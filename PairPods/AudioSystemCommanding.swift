@@ -10,6 +10,7 @@ protocol AudioSystemCommanding: Sendable {
     func createAggregateDevice(name: String, uid: String,
                                masterUID: String, subDeviceUIDs: [String]) async throws -> AudioDeviceID
     func destroyAggregateDevice(deviceID: AudioDeviceID) async throws
+    func prepareForBluetoothSharing(outputDeviceUIDs: [String]) async
     func setDefaultOutputDevice(deviceID: AudioDeviceID) async throws
     func setSampleRate(on deviceID: AudioDeviceID, to sampleRate: Double) -> Bool
 }

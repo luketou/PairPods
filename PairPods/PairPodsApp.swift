@@ -77,6 +77,7 @@ struct ContentView: View {
     @Binding private var isMenuPresented: Bool
     @Environment(\.openWindow) private var openWindow
     @AppStorage("PairPods.ReconnectTimeout") private var reconnectTimeout: Double = 10.0
+    @State private var showHFPWarning: Bool = false
 
     init(
         audioSharingManager: AudioSharingManager,
@@ -115,6 +116,34 @@ struct ContentView: View {
             )
             .accessibilityIdentifier("shareAudioToggle")
             .keyboardShortcut("s")
+
+            // HFP Warning: shown when a shared BT device is set as the system mic input.
+            // This triggers HFP profile fallback (8kHz mono) which degrades audio quality
+            // and can cause intermittent disconnections.
+            if showHFPWarning && audioSharingManager.isSharingAudio {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                        .font(.system(size: 12))
+                    Text("Mic set to shared device — may cause drops")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Fix") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.Sound") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.blue)
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
+                .background(Color.yellow.opacity(0.12))
+                .cornerRadius(6)
+                .accessibilityIdentifier("hfpWarningBanner")
+            }
 
             MenuSection(audioDeviceManager.compatibleDevices.isEmpty
                 ? "No Connected Devices"
@@ -217,7 +246,13 @@ struct ContentView: View {
                 NSApp.activate(ignoringOtherApps: true)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .bluetoothInputDeviceDetected)) { _ in
+            showHFPWarning = true
+        }
         .onReceive(audioSharingManager.$state) { newState in
+            if newState == .inactive {
+                showHFPWarning = false
+            }
             guard newState == .active else { return }
             Task {
                 await audioDeviceManager.refreshCompatibleDevices()

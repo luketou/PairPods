@@ -1,0 +1,24 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:PairPods}/ScreenshotGenerator",
+      "name": "Debug ScreenshotGenerator (ScreenshotGenerator)",
+      "target": "ScreenshotGenerator",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug ScreenshotGenerator (ScreenshotGenerator)"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:PairPods}/ScreenshotGenerator",
+      "name": "Release ScreenshotGenerator (ScreenshotGenerator)",
+      "target": "ScreenshotGenerator",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release ScreenshotGenerator (ScreenshotGenerator)"
+    }
+  ]
+}

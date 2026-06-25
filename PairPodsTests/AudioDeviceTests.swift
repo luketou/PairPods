@@ -51,6 +51,44 @@ struct AudioDeviceTests {
         #expect(!device.isCompatibleOutputDevice)
     }
 
+    @Test("Bluetooth output with temporarily unknown transport is compatible")
+    func bluetoothUIDWithUnknownTransportIsCompatible() {
+        let device = AudioDevice(
+            id: 601,
+            uid: "80-99-E7-F8-34-89:output",
+            name: "WH-1000XM6",
+            transportType: 0,
+            isOutputDevice: true,
+            sampleRate: 0
+        )
+
+        #expect(device.isBluetoothAudioDevice)
+        #expect(device.isCompatibleOutputDevice)
+    }
+
+    @Test("Unknown non-Bluetooth output remains incompatible")
+    func unknownNonBluetoothOutputIsIncompatible() {
+        let device = AudioDevice(
+            id: 602,
+            uid: "com.example.virtual-output",
+            name: "Virtual Output",
+            transportType: 0,
+            isOutputDevice: true,
+            sampleRate: 48000
+        )
+
+        #expect(!device.isBluetoothAudioDevice)
+        #expect(!device.isCompatibleOutputDevice)
+    }
+
+    @Test("Input and output UIDs resolve to the same physical Bluetooth device")
+    func physicalBluetoothDeviceIdentifier() {
+        #expect(
+            AudioDevice.physicalDeviceIdentifier(forUID: "2C-53-D7-60-35-9B:input") ==
+                AudioDevice.physicalDeviceIdentifier(forUID: "2C-53-D7-60-35-9B:output")
+        )
+    }
+
     @Test("Transport type descriptions", arguments: [
         (kAudioDeviceTransportTypeBluetooth, "Bluetooth"),
         (kAudioDeviceTransportTypeBluetoothLE, "Bluetooth LE"),

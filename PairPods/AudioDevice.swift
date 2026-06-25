@@ -359,9 +359,18 @@ struct AudioDevice: Identifiable {
     let sampleRate: Double
     let batteryInfo: BatteryInfo?
 
+    /// Some Bluetooth audio drivers briefly report an unknown transport while
+    /// the output endpoint is still being brought online. Their CoreAudio UID
+    /// continues to start with the device's Bluetooth MAC address, so retain
+    /// those endpoints instead of silently dropping a connected headset.
+    var isBluetoothAudioDevice: Bool {
+        transportType == kAudioDeviceTransportTypeBluetooth ||
+            transportType == kAudioDeviceTransportTypeBluetoothLE ||
+            Self.hasBluetoothAddressPrefix(uid)
+    }
+
     var isCompatibleOutputDevice: Bool {
-        isOutputDevice && (transportType == kAudioDeviceTransportTypeBluetooth ||
-            transportType == kAudioDeviceTransportTypeBluetoothLE)
+        isOutputDevice && isBluetoothAudioDevice
     }
 
     init(id: AudioDeviceID, uid: String, name: String, transportType: UInt32, isOutputDevice: Bool, sampleRate: Double, batteryInfo: BatteryInfo? = nil) {
@@ -377,9 +386,7 @@ struct AudioDevice: Identifiable {
     init?(deviceID: AudioDeviceID) async {
         id = deviceID
         guard let uid = deviceID.getStringProperty(selector: kAudioDevicePropertyDeviceUID),
-              let name = deviceID.getStringProperty(selector: kAudioDevicePropertyDeviceNameCFString),
-              let transportType = deviceID.getUInt32Property(selector: kAudioDevicePropertyTransportType),
-              let sampleRate = deviceID.getFloat64Property(selector: kAudioDevicePropertyNominalSampleRate)
+              let name = deviceID.getStringProperty(selector: kAudioDevicePropertyDeviceNameCFString)
         else {
             logWarning("Failed to initialize AudioDevice for ID: \(deviceID)")
             return nil
@@ -387,12 +394,13 @@ struct AudioDevice: Identifiable {
 
         self.uid = uid
         self.name = name
-        self.transportType = transportType
+        transportType = deviceID.getUInt32Property(selector: kAudioDevicePropertyTransportType) ?? 0
         let streamConfiguration = deviceID.getStreamConfiguration(scope: kAudioObjectPropertyScopeOutput)
         isOutputDevice = streamConfiguration?.mNumberBuffers ?? 0 > 0
-        self.sampleRate = sampleRate
+        sampleRate = deviceID.getFloat64Property(selector: kAudioDevicePropertyNominalSampleRate) ?? 0
         if transportType == kAudioDeviceTransportTypeBluetooth ||
-            transportType == kAudioDeviceTransportTypeBluetoothLE
+            transportType == kAudioDeviceTransportTypeBluetoothLE ||
+            Self.hasBluetoothAddressPrefix(uid)
         {
             batteryInfo = AudioDevice.queryBatteryFromBluetooth(forDeviceUID: uid)
         } else {
@@ -400,6 +408,21 @@ struct AudioDevice: Identifiable {
         }
 
         logDebug("Initialized AudioDevice: \(name) (ID: \(deviceID))")
+    }
+
+    static func physicalDeviceIdentifier(forUID uid: String) -> String {
+        uid.components(separatedBy: ":").first ?? uid
+    }
+
+    private static func hasBluetoothAddressPrefix(_ uid: String) -> Bool {
+        let prefix = physicalDeviceIdentifier(forUID: uid)
+        let normalized = prefix.replacingOccurrences(of: "-", with: ":")
+        let components = normalized.split(separator: ":")
+        guard components.count == 6 else { return false }
+
+        return components.allSatisfy { component in
+            component.count == 2 && component.allSatisfy(\.isHexDigit)
+        }
     }
 
     // MARK: - Battery Level Query

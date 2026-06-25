@@ -85,6 +85,8 @@ final class SimulatedAudioSystem: AudioSystemQuerying, AudioSystemCommanding, @u
         try await realSystem.destroyAggregateDevice(deviceID: deviceID)
     }
 
+    func prepareForBluetoothSharing(outputDeviceUIDs _: [String]) async {}
+
     func setDefaultOutputDevice(deviceID: AudioDeviceID) async throws {
         try await realSystem.setDefaultOutputDevice(deviceID: deviceID)
     }

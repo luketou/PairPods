@@ -68,7 +68,7 @@ struct CoreAudioSystem: AudioSystemQuerying, AudioSystemCommanding {
             kAudioAggregateDeviceUIDKey: uid,
             kAudioAggregateDeviceSubDeviceListKey: subDeviceList,
             kAudioAggregateDeviceMasterSubDeviceKey: masterUID,
-            kAudioAggregateDeviceIsStackedKey: 1,
+            kAudioAggregateDeviceIsStackedKey: 0, // 0 = multi-output mirror mode (same audio to all devices)
         ]
 
         var aggregateDevice: AudioDeviceID = 0
@@ -88,21 +88,80 @@ struct CoreAudioSystem: AudioSystemQuerying, AudioSystemCommanding {
         }
     }
 
-    func setDefaultOutputDevice(deviceID: AudioDeviceID) async throws {
+    func prepareForBluetoothSharing(outputDeviceUIDs: [String]) async {
+        let excludedPhysicalDevices = Set(
+            outputDeviceUIDs.map(AudioDevice.physicalDeviceIdentifier(forUID:))
+        )
         let systemObject = AudioObjectID(kAudioObjectSystemObject)
-        var propertyAddress = systemObject.getPropertyAddress(selector: kAudioHardwarePropertyDefaultOutputDevice)
+        var inputAddress = systemObject.getPropertyAddress(selector: kAudioHardwarePropertyDefaultInputDevice)
+        var defaultInputID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
 
-        var mutableDeviceID = deviceID
+        guard AudioObjectGetPropertyData(
+            systemObject,
+            &inputAddress,
+            0,
+            nil,
+            &size,
+            &defaultInputID
+        ) == noErr,
+            let defaultInputUID = defaultInputID.getStringProperty(selector: kAudioDevicePropertyDeviceUID),
+            excludedPhysicalDevices.contains(AudioDevice.physicalDeviceIdentifier(forUID: defaultInputUID))
+        else {
+            return
+        }
+
+        guard let deviceIDs = try? fetchAllAudioDeviceIDs(),
+              let builtInInputID = deviceIDs.first(where: { deviceID in
+                  guard deviceID.getUInt32Property(selector: kAudioDevicePropertyTransportType) ==
+                      kAudioDeviceTransportTypeBuiltIn
+                  else {
+                      return false
+                  }
+                  return (deviceID.getStreamConfiguration(scope: kAudioObjectPropertyScopeInput)?.mNumberBuffers ?? 0) > 0
+              })
+        else {
+            logWarning("Bluetooth microphone is active, but no built-in input device was available")
+            return
+        }
+
+        var newInputID = builtInInputID
         let status = AudioObjectSetPropertyData(
             systemObject,
-            &propertyAddress,
+            &inputAddress,
             0,
             nil,
             UInt32(MemoryLayout<AudioDeviceID>.size),
-            &mutableDeviceID
+            &newInputID
         )
-        guard status == noErr else {
-            throw AppError.operationError("Failed to set default output device. Status: \(status)")
+        if status == noErr {
+            logInfo("Moved default input to the built-in microphone to keep shared devices in A2DP mode")
+        } else {
+            logWarning("Failed to move default input away from shared Bluetooth device. Status: \(status)")
+        }
+    }
+
+    func setDefaultOutputDevice(deviceID: AudioDeviceID) async throws {
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
+        for selector in [
+            kAudioHardwarePropertyDefaultOutputDevice,
+            kAudioHardwarePropertyDefaultSystemOutputDevice,
+        ] {
+            var propertyAddress = systemObject.getPropertyAddress(selector: selector)
+            var mutableDeviceID = deviceID
+            let status = AudioObjectSetPropertyData(
+                systemObject,
+                &propertyAddress,
+                0,
+                nil,
+                UInt32(MemoryLayout<AudioDeviceID>.size),
+                &mutableDeviceID
+            )
+            guard status == noErr else {
+                throw AppError.operationError(
+                    "Failed to set output route \(selector). Status: \(status)"
+                )
+            }
         }
     }
 

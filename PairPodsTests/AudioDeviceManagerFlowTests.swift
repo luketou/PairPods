@@ -27,6 +27,7 @@ struct AudioDeviceManagerFlowTests {
         try await manager.setupMultiOutputDevice()
 
         #expect(mock.createAggregateCalls.count == 1)
+        #expect(mock.prepareForBluetoothSharingCalls == [["bt1", "bt2"]])
         #expect(mock.setDefaultOutputCalls.contains(999))
     }
 

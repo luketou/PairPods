@@ -14,6 +14,7 @@ import SwiftUI
 extension Notification.Name {
     static let audioDeviceConfigurationChanged = Notification.Name("audioDeviceConfigurationChanged")
     static let audioDeviceVolumeChanged = Notification.Name("audioDeviceVolumeChanged")
+    static let bluetoothInputDeviceDetected = Notification.Name("bluetoothInputDeviceDetected")
 }
 
 extension NotificationCenter {
@@ -38,9 +39,11 @@ final class AudioDeviceManager: ObservableObject {
     private var originalOutputDeviceID: AudioDeviceID?
     private var sharedDevices: [AudioDevice]?
     private var propertyListenerBlock: AudioObjectPropertyListenerBlock?
+    private var inputListenerBlock: AudioObjectPropertyListenerBlock?
     private var volumeListenerBlock: AudioObjectPropertyListenerBlock?
     private var volumeListenerDeviceIDs: [AudioDeviceID] = []
     private var initTask: Task<Void, Never>?
+    private var deviceChangeTask: Task<Void, Never>?
     private var volumeListenerTask: Task<Void, Never>?
     private let shouldShowAlerts: Bool
     private let audioSystem: AudioSystemQuerying & AudioSystemCommanding
@@ -125,6 +128,7 @@ final class AudioDeviceManager: ObservableObject {
     func cleanup() async {
         logInfo("Cleaning up AudioDeviceManager")
         initTask?.cancel()
+        deviceChangeTask?.cancel()
         volumeListenerTask?.cancel()
         await removeMultiOutputDevice()
         removePropertyListener()
@@ -176,6 +180,9 @@ final class AudioDeviceManager: ObservableObject {
 
         let masterDevice = sorted[0]
 
+        await audioSystem.prepareForBluetoothSharing(
+            outputDeviceUIDs: sorted.map(\.uid)
+        )
         let deviceID = try await audioSystem.createAggregateDevice(
             name: "PairPods Output Device",
             uid: multiOutputDeviceUID,
@@ -258,6 +265,12 @@ final class AudioDeviceManager: ObservableObject {
             let devices = try await audioSystem.fetchAllAudioDevices()
             compatibleDevices = devices.filter(\.isCompatibleOutputDevice)
             logInfo("Found \(compatibleDevices.count) compatible audio devices")
+            for device in devices where !device.isCompatibleOutputDevice {
+                logDebug(
+                    "Ignoring audio device \(device.name): output=\(device.isOutputDevice), " +
+                        "transport=\(device.transportType), uid=\(device.uid)"
+                )
+            }
         } catch {
             logError("Failed to refresh compatible devices", error: .systemError(error))
         }
@@ -357,7 +370,7 @@ final class AudioDeviceManager: ObservableObject {
         logDebug("Setting up audio device monitoring")
         propertyListenerBlock = { [weak self] _, _ in
             Task { @MainActor in
-                await self?.handleAudioDeviceChange()
+                self?.scheduleAudioDeviceChange()
             }
         }
 
@@ -366,6 +379,74 @@ final class AudioDeviceManager: ObservableObject {
         if status != noErr {
             let error = AppError.operationError("Status code: \(status)")
             logError("Failed to add audio device change listener", error: error)
+        }
+
+        // Monitor default input device changes to detect HFP protocol fallback.
+        // When a BT headset is set as the system input, macOS silently switches it
+        // from A2DP (stereo) to HFP (8kHz mono), which destabilises the audio connection.
+        setupInputDeviceMonitoring()
+    }
+
+    private func setupInputDeviceMonitoring() {
+        logDebug("Setting up input device monitoring for HFP detection")
+        inputListenerBlock = { [weak self] _, _ in
+            Task { @MainActor in
+                await self?.checkForHFPRisk()
+            }
+        }
+
+        guard let inputListenerBlock else { return }
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
+        var address = systemObject.getPropertyAddress(selector: kAudioHardwarePropertyDefaultInputDevice)
+        let status = AudioObjectAddPropertyListenerBlock(
+            systemObject,
+            &address,
+            DispatchQueue.main,
+            inputListenerBlock
+        )
+        if status != noErr {
+            logError("Failed to add input device change listener", error: .operationError("Status: \(status)"))
+        }
+    }
+
+    /// Checks if the current default input device is a Bluetooth device that is also
+    /// being shared. If so, posts a notification so the UI can warn the user.
+    /// This condition triggers HFP mode on the BT device, degrading audio quality
+    /// and causing connection instability.
+    private func checkForHFPRisk() async {
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
+        var address = systemObject.getPropertyAddress(selector: kAudioHardwarePropertyDefaultInputDevice)
+        var inputDeviceID = AudioDeviceID(0)
+        var propSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioObjectGetPropertyData(systemObject, &address, 0, nil, &propSize, &inputDeviceID)
+        guard status == noErr, inputDeviceID != kAudioObjectUnknown else { return }
+
+        // Check if the input device UID matches any device that is currently shared
+        if let inputUID = inputDeviceID.getStringProperty(selector: kAudioDevicePropertyDeviceUID),
+           let shared = sharedDevices,
+           shared.contains(where: {
+               AudioDevice.physicalDeviceIdentifier(forUID: $0.uid) ==
+                   AudioDevice.physicalDeviceIdentifier(forUID: inputUID)
+           })
+        {
+            logWarning("HFP risk: system input is set to a shared BT device (\(inputUID)). Audio quality may degrade.")
+            NotificationCenter.default.post(name: .bluetoothInputDeviceDetected, object: nil)
+        }
+    }
+
+    private func scheduleAudioDeviceChange() {
+        // CoreAudio emits several events while a Bluetooth endpoint is settling.
+        // Use a trailing-edge debounce so the final event is always processed
+        // instead of dropping it while an earlier refresh is still running.
+        // Bluetooth output streams can take more than a second to become
+        // readable, so retry a few times after the event burst.
+        deviceChangeTask?.cancel()
+        deviceChangeTask = Task { [weak self] in
+            for delay in [300, 1_000, 2_000] {
+                try? await Task.sleep(for: .milliseconds(delay))
+                guard !Task.isCancelled else { return }
+                await self?.handleAudioDeviceChange()
+            }
         }
     }
 
@@ -435,19 +516,38 @@ final class AudioDeviceManager: ObservableObject {
     }
 
     private func removePropertyListener() {
-        guard let propertyListenerBlock else { return }
         let systemObject = AudioObjectID(kAudioObjectSystemObject)
-        var address = systemObject.getPropertyAddress(selector: kAudioHardwarePropertyDevices)
-        let status = AudioObjectRemovePropertyListenerBlock(
-            systemObject,
-            &address,
-            DispatchQueue.main,
-            propertyListenerBlock
-        )
-        if status != noErr {
-            logError("Failed to remove property listener", error: .operationError("Status: \(status)"))
+
+        if let propertyListenerBlock {
+            var address = systemObject.getPropertyAddress(selector: kAudioHardwarePropertyDevices)
+            let status = AudioObjectRemovePropertyListenerBlock(
+                systemObject,
+                &address,
+                DispatchQueue.main,
+                propertyListenerBlock
+            )
+            if status != noErr {
+                logError("Failed to remove property listener", error: .operationError("Status: \(status)"))
+            }
+        }
+
+        if let inputListenerBlock {
+            var address = systemObject.getPropertyAddress(selector: kAudioHardwarePropertyDefaultInputDevice)
+            let status = AudioObjectRemovePropertyListenerBlock(
+                systemObject,
+                &address,
+                DispatchQueue.main,
+                inputListenerBlock
+            )
+            if status != noErr {
+                logError("Failed to remove input listener", error: .operationError("Status: \(status)"))
+            }
         }
     }
+
+    // Cache of the last reported volume per device, used to suppress duplicate notifications
+    // when the hardware echoes back the value we just set programmatically.
+    private var lastReportedVolumes: [AudioDeviceID: Float] = [:]
 
     /// Handle a volume change event for a specific device
     private func handleVolumeChange(deviceID: AudioDeviceID, propertyAddress: AudioObjectPropertyAddress) {
@@ -459,12 +559,23 @@ final class AudioDeviceManager: ObservableObject {
             return
         }
 
-        if let newVolume = device.getVolume() {
-            logInfo("Volume for \(device.name): \(newVolume)")
-            NotificationCenter.default.postDeviceVolumeChanged(deviceID: deviceID, volume: newVolume)
-        } else {
+        guard let newVolume = device.getVolume() else {
             logWarning("Failed to get volume for device: \(device.name)")
+            return
         }
+
+        // Suppress duplicate notifications: only post when volume has meaningfully changed
+        // (>0.1% change). This prevents a feedback loop where setting volume programmatically
+        // causes CoreAudio to fire a property change notification with the same value.
+        let lastVolume = lastReportedVolumes[deviceID] ?? -1
+        guard abs(newVolume - lastVolume) > 0.001 else {
+            logDebug("Volume change suppressed for \(device.name): no meaningful change (\(newVolume))")
+            return
+        }
+
+        lastReportedVolumes[deviceID] = newVolume
+        logInfo("Volume for \(device.name): \(newVolume)")
+        NotificationCenter.default.postDeviceVolumeChanged(deviceID: deviceID, volume: newVolume)
     }
 
     /// Remove previously registered volume/mute listeners and add them for the given devices.

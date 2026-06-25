@@ -27,6 +27,7 @@ struct PreviewAudioSystem: AudioSystemQuerying, AudioSystemCommanding {
     }
 
     func destroyAggregateDevice(deviceID _: AudioDeviceID) async throws {}
+    func prepareForBluetoothSharing(outputDeviceUIDs _: [String]) async {}
     func setDefaultOutputDevice(deviceID _: AudioDeviceID) async throws {}
     func setSampleRate(on _: AudioDeviceID, to _: Double) -> Bool {
         false

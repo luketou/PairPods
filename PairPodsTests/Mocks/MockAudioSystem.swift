@@ -33,6 +33,7 @@ final class MockAudioSystem: AudioSystemQuerying, AudioSystemCommanding, @unchec
 
     var createAggregateCalls: [CreateAggregateCall] = []
     var destroyAggregateCalls: [AudioDeviceID] = []
+    var prepareForBluetoothSharingCalls: [[String]] = []
     var setDefaultOutputCalls: [AudioDeviceID] = []
     var setSampleRateCalls: [SetSampleRateCall] = []
     var fetchAllDevicesCalls = 0
@@ -70,6 +71,10 @@ final class MockAudioSystem: AudioSystemQuerying, AudioSystemCommanding, @unchec
         if let error = destroyAggregateError {
             throw error
         }
+    }
+
+    func prepareForBluetoothSharing(outputDeviceUIDs: [String]) async {
+        prepareForBluetoothSharingCalls.append(outputDeviceUIDs)
     }
 
     func setDefaultOutputDevice(deviceID: AudioDeviceID) async throws {
